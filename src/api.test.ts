@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { loadConfig } from './config.js';
-import { passwordMatches } from './api.js';
+import {
+  buildPasswordCreate,
+  buildPasswordUpdate,
+  passwordMatches,
+  sha1,
+} from './api.js';
+import { listTools } from './tools.js';
 import { toPasswordMeta, type Password } from './types.js';
 
 const BASE_ENV = {
@@ -59,6 +65,7 @@ test('loadConfig rejects non-http(s) schemes', () => {
 function samplePassword(overrides: Partial<Password> = {}): Password {
   return {
     id: 'abc123',
+    revision: 'rev-1',
     label: 'GitHub',
     username: 'octocat',
     password: 'super-secret-value',
@@ -122,4 +129,73 @@ test('passwordMatches never matches against the secret, notes or custom fields',
 
 test('passwordMatches treats an empty query as match-all', () => {
   assert.ok(passwordMatches(samplePassword(), '   '));
+});
+
+// -----------------------------------------------------------------------------
+// write payload builders
+// -----------------------------------------------------------------------------
+
+test('sha1 produces the expected hex digest', () => {
+  // Known SHA-1 of the empty string and of "abc".
+  assert.equal(sha1(''), 'da39a3ee5e6b4b0d3255bfef95601890afd80709');
+  assert.equal(sha1('abc'), 'a9993e364706816aba3e25717850c26c9cd0d89d');
+});
+
+test('buildPasswordCreate defaults optional fields and pins cseType none', () => {
+  const payload = buildPasswordCreate({ label: 'X', password: 'secret' });
+  assert.equal(payload.label, 'X');
+  assert.equal(payload.password, 'secret');
+  assert.equal(payload.username, '');
+  assert.equal(payload.url, '');
+  assert.equal(payload.notes, '');
+  assert.equal(payload.favorite, false);
+  assert.equal(payload.cseType, 'none');
+  assert.equal(payload.hash, sha1('secret'));
+});
+
+test('buildPasswordUpdate merges changes over current and preserves the rest', () => {
+  const current = samplePassword();
+  const payload = buildPasswordUpdate(current, { label: 'GitLab' });
+  // changed
+  assert.equal(payload.label, 'GitLab');
+  // preserved from current (NOT blanked)
+  assert.equal(payload.password, current.password);
+  assert.equal(payload.username, current.username);
+  assert.equal(payload.url, current.url);
+  assert.equal(payload.notes, current.notes);
+  assert.equal(payload.customFields, current.customFields);
+  // safety fields
+  assert.equal(payload.id, current.id);
+  assert.equal(payload.revision, current.revision);
+  assert.equal(payload.cseType, 'none');
+});
+
+test('buildPasswordUpdate recomputes the hash when the password changes', () => {
+  const payload = buildPasswordUpdate(samplePassword(), { password: 'new-secret' });
+  assert.equal(payload.password, 'new-secret');
+  assert.equal(payload.hash, sha1('new-secret'));
+});
+
+// -----------------------------------------------------------------------------
+// read-only gating
+// -----------------------------------------------------------------------------
+
+test('listTools exposes writes only when not read-only', () => {
+  const writeNames = [
+    'create_password',
+    'update_password',
+    'delete_password',
+    'create_folder',
+    'update_folder',
+    'delete_folder',
+  ];
+
+  const rw = listTools(false).map((t) => t.name);
+  for (const n of writeNames) assert.ok(rw.includes(n), `read/write mode should expose ${n}`);
+  assert.equal(rw.length, 12);
+
+  const ro = listTools(true).map((t) => t.name);
+  for (const n of writeNames) assert.ok(!ro.includes(n), `read-only mode must hide ${n}`);
+  assert.equal(ro.length, 6);
+  assert.ok(ro.includes('get_password'), 'read tools remain in read-only mode');
 });

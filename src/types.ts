@@ -19,6 +19,8 @@
  */
 export interface Password {
   id: string;
+  /** Latest revision id. Passed back on update/delete for conflict safety. */
+  revision: string;
   label: string;
   username: string;
   /** The plaintext secret (CSE disabled). Secret-bearing. */
@@ -68,6 +70,8 @@ export interface PasswordMeta {
 /** A folder as returned by `folder/list` / `folder/show`. */
 export interface Folder {
   id: string;
+  /** Latest revision id. Passed back on update/delete for conflict safety. */
+  revision: string;
   label: string;
   parent: string;
   cseType: string;

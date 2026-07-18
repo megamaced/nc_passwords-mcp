@@ -8,21 +8,23 @@ import {
 
 import { loadConfig } from './config.js';
 import { PasswordsClient } from './http.js';
-import { dispatchTool, TOOLS, type Context } from './tools.js';
+import { dispatchTool, listTools, type Context } from './tools.js';
 
 const config = loadConfig();
 const client = new PasswordsClient(config);
 const ctx: Context = {
   client,
   configSummary: `${config.url} as ${config.user}`,
+  readOnly: config.readOnly,
 };
 
 const server = new Server(
-  { name: 'passwords-mcp', version: '0.1.0' },
+  { name: 'passwords-mcp', version: '0.2.0' },
   { capabilities: { tools: {} } },
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+const tools = listTools(config.readOnly);
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
 server.setRequestHandler(CallToolRequestSchema, async (req) =>
   dispatchTool(req.params.name, req.params.arguments, ctx),

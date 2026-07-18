@@ -2,24 +2,36 @@ import { z, type ZodTypeAny } from 'zod';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 
 import {
+  AlreadyTrashedError,
+  createFolder,
+  createPassword,
+  HttpError,
   listFolders,
   listPasswords,
   passwordMatches,
   showFolder,
   showPassword,
+  trashFolder,
+  trashPassword,
+  updateFolder,
+  updatePassword,
 } from './api.js';
-import { CseUnsupportedError, HttpError, type PasswordsClient } from './http.js';
+import { CseUnsupportedError, type PasswordsClient } from './http.js';
 import { toPasswordMeta } from './types.js';
 
 export interface Context {
   client: PasswordsClient;
   configSummary: string;
+  /** When true, write tools are hidden and refused. */
+  readOnly: boolean;
 }
 
 interface ToolDef<S extends ZodTypeAny> {
   tool: Tool;
   argsSchema: S;
   handler: (args: z.infer<S>, ctx: Context) => Promise<CallToolResult>;
+  /** Mutating tool — excluded from the tool list and refused when readOnly. */
+  write?: boolean;
 }
 
 const Empty = z.object({}).strict();
@@ -33,7 +45,7 @@ function textResult(text: string): CallToolResult {
 }
 
 // -----------------------------------------------------------------------------
-// ping
+// Read tools
 // -----------------------------------------------------------------------------
 
 const ping: ToolDef<typeof Empty> = {
@@ -52,15 +64,11 @@ const ping: ToolDef<typeof Empty> = {
       listFolders(ctx.client),
     ]);
     return textResult(
-      `OK — connected to ${ctx.configSummary}; ` +
+      `OK — connected to ${ctx.configSummary} (${ctx.readOnly ? 'read-only' : 'read/write'}); ` +
         `${passwords.length} password(s), ${folders.length} folder(s) visible.`,
     );
   },
 };
-
-// -----------------------------------------------------------------------------
-// list_passwords  (metadata only — never returns secrets)
-// -----------------------------------------------------------------------------
 
 const ListPasswordsArgs = z
   .object({
@@ -94,10 +102,6 @@ const listPasswordsTool: ToolDef<typeof ListPasswordsArgs> = {
   },
 };
 
-// -----------------------------------------------------------------------------
-// search_passwords  (metadata only — never returns secrets)
-// -----------------------------------------------------------------------------
-
 const SearchPasswordsArgs = z
   .object({
     query: z.string().min(1, 'query is required'),
@@ -128,10 +132,6 @@ const searchPasswordsTool: ToolDef<typeof SearchPasswordsArgs> = {
   },
 };
 
-// -----------------------------------------------------------------------------
-// get_password  (the ONLY tool that reveals a secret — single item, explicit)
-// -----------------------------------------------------------------------------
-
 const GetPasswordArgs = z
   .object({
     id: z.string().min(1, 'id is required'),
@@ -158,7 +158,6 @@ const getPasswordTool: ToolDef<typeof GetPasswordArgs> = {
   },
   handler: async (args, ctx) => {
     const p = await showPassword(ctx.client, args.id);
-    // Return the full record for this explicitly-requested single item.
     return jsonResult({
       id: p.id,
       label: p.label,
@@ -175,10 +174,6 @@ const getPasswordTool: ToolDef<typeof GetPasswordArgs> = {
   },
 };
 
-// -----------------------------------------------------------------------------
-// list_folders / get_folder
-// -----------------------------------------------------------------------------
-
 const listFoldersTool: ToolDef<typeof Empty> = {
   argsSchema: Empty,
   tool: {
@@ -191,11 +186,7 @@ const listFoldersTool: ToolDef<typeof Empty> = {
   handler: async (_args, ctx) => jsonResult(await listFolders(ctx.client)),
 };
 
-const GetFolderArgs = z
-  .object({
-    id: z.string().min(1, 'id is required'),
-  })
-  .strict();
+const GetFolderArgs = z.object({ id: z.string().min(1, 'id is required') }).strict();
 
 const getFolderTool: ToolDef<typeof GetFolderArgs> = {
   argsSchema: GetFolderArgs,
@@ -204,14 +195,217 @@ const getFolderTool: ToolDef<typeof GetFolderArgs> = {
     description: 'Fetch a single folder by its id.',
     inputSchema: {
       type: 'object',
-      properties: {
-        id: { type: 'string', description: 'The folder id.' },
-      },
+      properties: { id: { type: 'string', description: 'The folder id.' } },
       required: ['id'],
       additionalProperties: false,
     },
   },
   handler: async (args, ctx) => jsonResult(await showFolder(ctx.client, args.id)),
+};
+
+// -----------------------------------------------------------------------------
+// Write tools
+// -----------------------------------------------------------------------------
+
+const CreatePasswordArgs = z
+  .object({
+    label: z.string().min(1, 'label is required'),
+    password: z.string().min(1, 'password is required'),
+    username: z.string().optional(),
+    url: z.string().optional(),
+    notes: z.string().optional(),
+    folder: z.string().optional().describe('Folder id to file it under; omit for the base folder.'),
+    favorite: z.boolean().optional(),
+  })
+  .strict();
+
+const createPasswordTool: ToolDef<typeof CreatePasswordArgs> = {
+  write: true,
+  argsSchema: CreatePasswordArgs,
+  tool: {
+    name: 'create_password',
+    description:
+      'Create a new password entry. Requires a label and the secret value; ' +
+      'username, url, notes, folder id and favorite are optional. Stored with ' +
+      'server-side encryption (cseType none).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Display label (required).' },
+        password: { type: 'string', description: 'The secret value (required).' },
+        username: { type: 'string' },
+        url: { type: 'string' },
+        notes: { type: 'string' },
+        folder: { type: 'string', description: 'Folder id; omit for the base folder.' },
+        favorite: { type: 'boolean' },
+      },
+      required: ['label', 'password'],
+      additionalProperties: false,
+    },
+  },
+  handler: async (args, ctx) => jsonResult(await createPassword(ctx.client, args)),
+};
+
+const UpdatePasswordArgs = z
+  .object({
+    id: z.string().min(1, 'id is required'),
+    label: z.string().optional(),
+    password: z.string().optional(),
+    username: z.string().optional(),
+    url: z.string().optional(),
+    notes: z.string().optional(),
+    folder: z.string().optional(),
+    favorite: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (a) =>
+      a.label !== undefined ||
+      a.password !== undefined ||
+      a.username !== undefined ||
+      a.url !== undefined ||
+      a.notes !== undefined ||
+      a.folder !== undefined ||
+      a.favorite !== undefined,
+    { message: 'provide at least one field to change besides id' },
+  );
+
+const updatePasswordTool: ToolDef<typeof UpdatePasswordArgs> = {
+  write: true,
+  argsSchema: UpdatePasswordArgs,
+  tool: {
+    name: 'update_password',
+    description:
+      'Update fields of an existing password by id. Only the fields you pass are ' +
+      'changed; all others are preserved (the server rejects the write if the ' +
+      'entry changed underneath us). Provide at least one field besides id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Id of the password to update (required).' },
+        label: { type: 'string' },
+        password: { type: 'string' },
+        username: { type: 'string' },
+        url: { type: 'string' },
+        notes: { type: 'string' },
+        folder: { type: 'string' },
+        favorite: { type: 'boolean' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  handler: async (args, ctx) => {
+    const { id, ...changes } = args;
+    return jsonResult(await updatePassword(ctx.client, id, changes));
+  },
+};
+
+const DeletePasswordArgs = z.object({ id: z.string().min(1, 'id is required') }).strict();
+
+const deletePasswordTool: ToolDef<typeof DeletePasswordArgs> = {
+  write: true,
+  argsSchema: DeletePasswordArgs,
+  tool: {
+    name: 'delete_password',
+    description:
+      'Move a password to the trash (a reversible, soft delete — restore it from ' +
+      'the Passwords app). Refuses if the entry is already trashed, so it can ' +
+      'never permanently delete anything.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Id of the password to trash.' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  handler: async (args, ctx) => {
+    await trashPassword(ctx.client, args.id);
+    return textResult(`Moved password ${args.id} to the trash (reversible).`);
+  },
+};
+
+const CreateFolderArgs = z
+  .object({
+    label: z.string().min(1, 'label is required'),
+    parent: z.string().optional().describe('Parent folder id; omit for the base folder.'),
+  })
+  .strict();
+
+const createFolderTool: ToolDef<typeof CreateFolderArgs> = {
+  write: true,
+  argsSchema: CreateFolderArgs,
+  tool: {
+    name: 'create_folder',
+    description: 'Create a new folder. Requires a label; parent folder id is optional.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Folder label (required).' },
+        parent: { type: 'string', description: 'Parent folder id; omit for the base folder.' },
+      },
+      required: ['label'],
+      additionalProperties: false,
+    },
+  },
+  handler: async (args, ctx) => jsonResult(await createFolder(ctx.client, args.label, args.parent)),
+};
+
+const UpdateFolderArgs = z
+  .object({
+    id: z.string().min(1, 'id is required'),
+    label: z.string().optional(),
+    parent: z.string().optional(),
+  })
+  .strict()
+  .refine((a) => a.label !== undefined || a.parent !== undefined, {
+    message: 'provide a label and/or parent to change',
+  });
+
+const updateFolderTool: ToolDef<typeof UpdateFolderArgs> = {
+  write: true,
+  argsSchema: UpdateFolderArgs,
+  tool: {
+    name: 'update_folder',
+    description: 'Rename a folder and/or move it under a different parent, by id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Id of the folder to update (required).' },
+        label: { type: 'string' },
+        parent: { type: 'string', description: 'New parent folder id.' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  handler: async (args, ctx) => {
+    const { id, ...changes } = args;
+    return jsonResult(await updateFolder(ctx.client, id, changes));
+  },
+};
+
+const DeleteFolderArgs = z.object({ id: z.string().min(1, 'id is required') }).strict();
+
+const deleteFolderTool: ToolDef<typeof DeleteFolderArgs> = {
+  write: true,
+  argsSchema: DeleteFolderArgs,
+  tool: {
+    name: 'delete_folder',
+    description:
+      'Move a folder AND ITS CONTENTS to the trash (reversible, soft delete). ' +
+      'Refuses if the folder is already trashed, so it can never permanently delete.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Id of the folder to trash.' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  handler: async (args, ctx) => {
+    await trashFolder(ctx.client, args.id);
+    return textResult(`Moved folder ${args.id} and its contents to the trash (reversible).`);
+  },
 };
 
 // -----------------------------------------------------------------------------
@@ -226,9 +420,20 @@ const REGISTRY: Record<string, ToolDef<any>> = {
   get_password: getPasswordTool,
   list_folders: listFoldersTool,
   get_folder: getFolderTool,
+  create_password: createPasswordTool,
+  update_password: updatePasswordTool,
+  delete_password: deletePasswordTool,
+  create_folder: createFolderTool,
+  update_folder: updateFolderTool,
+  delete_folder: deleteFolderTool,
 };
 
-export const TOOLS: Tool[] = Object.values(REGISTRY).map((d) => d.tool);
+/** The tools to advertise. Write tools are omitted entirely in read-only mode. */
+export function listTools(readOnly: boolean): Tool[] {
+  return Object.values(REGISTRY)
+    .filter((d) => !(readOnly && d.write))
+    .map((d) => d.tool);
+}
 
 export async function dispatchTool(
   name: string,
@@ -238,6 +443,17 @@ export async function dispatchTool(
   const def = REGISTRY[name];
   if (!def) {
     return { isError: true, content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
+  }
+
+  // Defence in depth: refuse writes in read-only mode even if a client somehow
+  // calls a tool that was never advertised.
+  if (ctx.readOnly && def.write) {
+    return {
+      isError: true,
+      content: [
+        { type: 'text', text: `Tool ${name} is disabled: server is in read-only mode (PASSWORDS_READONLY=true).` },
+      ],
+    };
   }
 
   const parsed = def.argsSchema.safeParse(rawArgs ?? {});
@@ -252,7 +468,9 @@ export async function dispatchTool(
     return await def.handler(parsed.data, ctx);
   } catch (err) {
     const message =
-      err instanceof CseUnsupportedError || err instanceof HttpError
+      err instanceof AlreadyTrashedError ||
+      err instanceof CseUnsupportedError ||
+      err instanceof HttpError
         ? err.message
         : err instanceof Error
           ? err.message
