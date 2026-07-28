@@ -5,7 +5,7 @@ import { loadConfig } from './config.js';
 import { passwordMatches } from './api.js';
 import type { PasswordsClient } from './http.js';
 import { dispatchTool, listTools } from './tools.js';
-import { toPasswordMeta, type Password } from './types.js';
+import { toFolderMeta, toPasswordMeta, type Folder, type Password } from './types.js';
 
 const BASE_ENV = {
   NEXTCLOUD_URL: 'https://cloud.example.com',
@@ -125,6 +125,38 @@ test('toPasswordMeta keeps identifying metadata', () => {
   assert.equal(meta.url, 'https://github.com');
 });
 
+test('toFolderMeta omits unknown secret-bearing runtime fields', () => {
+  const folder = {
+    id: 'folder-1',
+    revision: 'revision-1',
+    label: 'Production',
+    parent: 'root',
+    cseType: 'none',
+    sseType: 'SSEv1r2',
+    edited: 1,
+    created: 1,
+    updated: 1,
+    favorite: false,
+    hidden: false,
+    trashed: false,
+    password: 'folder-canary-secret',
+  } as Folder & { password: string };
+
+  const meta = toFolderMeta(folder);
+  assert.ok(!JSON.stringify(meta).includes('folder-canary-secret'));
+  assert.deepEqual(meta, {
+    id: 'folder-1',
+    label: 'Production',
+    parent: 'root',
+    edited: 1,
+    created: 1,
+    updated: 1,
+    favorite: false,
+    hidden: false,
+    trashed: false,
+  });
+});
+
 // -----------------------------------------------------------------------------
 // search only matches non-secret fields
 // -----------------------------------------------------------------------------
@@ -171,4 +203,45 @@ test('dispatch replaces unexpected secret-bearing errors with a fixed code', asy
   const serialised = JSON.stringify(result);
   assert.ok(!serialised.includes('canary-secret'));
   assert.match(serialised, /OPERATION_FAILED/);
+});
+
+test('dispatch rejects inherited registry names with the fixed unknown-tool code', async () => {
+  const result = await dispatchTool('constructor', {}, {
+    client: {} as PasswordsClient,
+    configSummary: 'https://cloud.example.com as alice',
+  });
+  assert.match(JSON.stringify(result), /UNKNOWN_TOOL/);
+});
+
+test('folder tools apply the folder metadata allowlist', async () => {
+  const folder = {
+    id: 'folder-1',
+    revision: 'revision-1',
+    label: 'Production',
+    parent: 'root',
+    cseType: 'none',
+    sseType: 'SSEv1r2',
+    edited: 1,
+    created: 1,
+    updated: 1,
+    favorite: false,
+    hidden: false,
+    trashed: false,
+    password: 'folder-canary-secret',
+  };
+  const client = {
+    apiJson: async (_method: string, path: string) =>
+      path === '/folder/list' ? [folder] : folder,
+  } as unknown as PasswordsClient;
+
+  for (const [tool, args] of [
+    ['list_folders', {}],
+    ['get_folder', { id: 'folder-1' }],
+  ] as const) {
+    const result = await dispatchTool(tool, args, {
+      client,
+      configSummary: 'https://cloud.example.com as alice',
+    });
+    assert.ok(!JSON.stringify(result).includes('folder-canary-secret'));
+  }
 });

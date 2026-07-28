@@ -84,6 +84,19 @@ export interface Folder {
   trashed: boolean;
 }
 
+/** Explicit non-secret folder projection safe for MCP serialization. */
+export interface FolderMeta {
+  id: string;
+  label: string;
+  parent: string;
+  edited: number;
+  created: number;
+  updated: number;
+  favorite: boolean;
+  hidden: boolean;
+  trashed: boolean;
+}
+
 /**
  * Project every {@link Password} down to its non-secret {@link PasswordMeta}.
  * This is the single choke point that keeps plaintext secrets out of every MCP
@@ -102,5 +115,20 @@ export function toPasswordMeta(p: Password): PasswordMeta {
     statusCode: p.statusCode,
     edited: p.edited,
     updated: p.updated,
+  };
+}
+
+/** Project a runtime folder response onto the fixed MCP metadata allowlist. */
+export function toFolderMeta(folder: Folder): FolderMeta {
+  return {
+    id: folder.id,
+    label: folder.label,
+    parent: folder.parent,
+    edited: folder.edited,
+    created: folder.created,
+    updated: folder.updated,
+    favorite: folder.favorite,
+    hidden: folder.hidden,
+    trashed: folder.trashed,
   };
 }

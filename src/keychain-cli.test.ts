@@ -55,3 +55,17 @@ test('parseCliArgs accepts only install with one allowlisted profile name', () =
     /USAGE/,
   );
 });
+
+test('installProfile rejects inherited object property names', async () => {
+  await assert.rejects(
+    installProfile(
+      MANIFEST,
+      'toString',
+      async () => 'must-not-run',
+      async () => {
+        throw new Error('must-not-run');
+      },
+    ),
+    /PROFILE_NOT_FOUND/,
+  );
+});

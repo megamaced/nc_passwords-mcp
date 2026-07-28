@@ -8,7 +8,7 @@ import {
   showFolder,
 } from './api.js';
 import { CseUnsupportedError, HttpError, type PasswordsClient } from './http.js';
-import { toPasswordMeta } from './types.js';
+import { toFolderMeta, toPasswordMeta } from './types.js';
 
 export interface Context {
   client: PasswordsClient;
@@ -110,7 +110,8 @@ const listFoldersTool: ToolDef<typeof Empty> = {
     description: 'List folder metadata. Folders contain no secret values.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
-  handler: async (_args, ctx) => jsonResult(await listFolders(ctx.client)),
+  handler: async (_args, ctx) =>
+    jsonResult((await listFolders(ctx.client)).map(toFolderMeta)),
 };
 
 const GetFolderArgs = z.object({ id: z.string().min(1) }).strict();
@@ -127,7 +128,8 @@ const getFolderTool: ToolDef<typeof GetFolderArgs> = {
       additionalProperties: false,
     },
   },
-  handler: async (args, ctx) => jsonResult(await showFolder(ctx.client, args.id)),
+  handler: async (args, ctx) =>
+    jsonResult(toFolderMeta(await showFolder(ctx.client, args.id))),
 };
 
 // Tool definitions intentionally have different Zod input shapes.
@@ -159,13 +161,13 @@ export async function dispatchTool(
   rawArgs: unknown,
   ctx: Context,
 ): Promise<CallToolResult> {
-  const definition = REGISTRY[name];
-  if (!definition) {
+  if (!Object.hasOwn(REGISTRY, name)) {
     return {
       isError: true,
       content: [{ type: 'text', text: JSON.stringify({ ok: false, code: 'UNKNOWN_TOOL' }) }],
     };
   }
+  const definition = REGISTRY[name]!;
 
   const parsed = definition.argsSchema.safeParse(rawArgs ?? {});
   if (!parsed.success) {

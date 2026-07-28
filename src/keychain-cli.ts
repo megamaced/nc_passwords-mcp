@@ -45,8 +45,8 @@ export async function installProfile(
   fetchSecret: (sourceId: string) => Promise<string>,
   store: (destination: CredentialRef, secret: Buffer) => Promise<void>,
 ): Promise<InstallReceipt> {
-  const profile = manifest.profiles[profileName];
-  if (!profile) throw new Error('PROFILE_NOT_FOUND');
+  if (!Object.hasOwn(manifest.profiles, profileName)) throw new Error('PROFILE_NOT_FOUND');
+  const profile = manifest.profiles[profileName]!;
 
   let plaintext = await fetchSecret(profile.source_id);
   const secret = Buffer.from(plaintext, 'utf8');
