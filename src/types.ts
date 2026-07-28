@@ -4,8 +4,8 @@
 // See the API reference at:
 // https://git.mdns.eu/nextcloud/passwords/-/wikis/Developers/Api/Index
 //
-// This server is READ-ONLY. It never sends create/update/delete requests, so
-// only the read shapes are modelled here.
+// The MCP server is metadata-only. The out-of-band keychain helper fetches one
+// exact record internally, but neither component prints a secret value.
 // -----------------------------------------------------------------------------
 
 /**
@@ -86,8 +86,8 @@ export interface Folder {
 
 /**
  * Project every {@link Password} down to its non-secret {@link PasswordMeta}.
- * This is the single choke point that keeps plaintext secrets out of list and
- * search results — only the explicit `get_password` tool bypasses it.
+ * This is the single choke point that keeps plaintext secrets out of every MCP
+ * password result. No secret-returning MCP tool exists.
  */
 export function toPasswordMeta(p: Password): PasswordMeta {
   return {

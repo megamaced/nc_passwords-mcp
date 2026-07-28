@@ -1,15 +1,16 @@
 {
   "name": "passwords-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Model Context Protocol server for the Nextcloud Passwords app",
+  "description": "Metadata-only MCP server and credential-store helper for Nextcloud Passwords",
   "license": "MIT",
   "engines": {
     "node": ">=24"
   },
   "bin": {
-    "passwords-mcp": "./dist/index.js"
+    "passwords-mcp": "./dist/index.js",
+    "passwords-mcp-keychain": "./dist/keychain-cli.js"
   },
   "files": [
     "dist"

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0
+
+Make the MCP surface permanently metadata-only and move secret transfer into an
+out-of-band credential-store helper.
+
+- Remove `get_password` and all create/update/delete MCP tools.
+- Reject plaintext `NEXTCLOUD_APP_PASSWORD` configuration; resolve the
+  Nextcloud app-password from an exact macOS Keychain or Linux Secret Service
+  reference.
+- Add `passwords-mcp-keychain install`, driven by a strict reference-only
+  manifest at an OS-fixed, owner-only path, to copy one exact vault entry into
+  the OS credential store without printing it.
+- Replace remote response bodies and unexpected exception text with fixed MCP
+  error codes.
+- Require HTTPS for every connection and refuse redirects.
+- Add canary-secret tests for tool registration, error redaction, manifests,
+  command arguments, and helper receipts.
+
 ## 0.2.0
 
 Add write capabilities.

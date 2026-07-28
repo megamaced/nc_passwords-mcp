@@ -8,22 +8,23 @@ import {
 
 import { loadConfig } from './config.js';
 import { PasswordsClient } from './http.js';
+import { readSecret } from './secret-store.js';
 import { dispatchTool, listTools, type Context } from './tools.js';
 
 const config = loadConfig();
-const client = new PasswordsClient(config);
+const appPassword = await readSecret(config.credential);
+const client = new PasswordsClient(config, appPassword);
 const ctx: Context = {
   client,
-  configSummary: `${config.url} as ${config.user}`,
-  readOnly: config.readOnly,
+  configSummary: `${new URL(config.url).origin} as ${config.user}`,
 };
 
 const server = new Server(
-  { name: 'passwords-mcp', version: '0.2.0' },
+  { name: 'passwords-mcp', version: '0.3.0' },
   { capabilities: { tools: {} } },
 );
 
-const tools = listTools(config.readOnly);
+const tools = listTools();
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
 server.setRequestHandler(CallToolRequestSchema, async (req) =>

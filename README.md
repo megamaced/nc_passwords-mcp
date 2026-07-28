@@ -1,75 +1,114 @@
 # passwords-mcp
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for the [Nextcloud Passwords](https://git.mdns.eu/nextcloud/passwords) app. It lets Claude and other MCP-compatible clients read and manage entries in your Nextcloud password vault — listing/searching by metadata, revealing a single secret on request, and creating, updating, and (reversibly) deleting passwords and folders.
+A metadata-only [Model Context Protocol](https://modelcontextprotocol.io) server
+for the [Nextcloud Passwords](https://git.mdns.eu/nextcloud/passwords) app.
 
-> ⚠️ **This project is 100% AI-written.** All source code, tests, CI configuration, and this documentation were written by AI (Claude). Review it yourself before pointing it at a real password vault. It is provided as-is, with no warranty (see [LICENSE](LICENSE)).
+The MCP server can list and search identifying metadata, but it has no tool that
+reveals, creates, updates, or deletes a password. A separate
+`passwords-mcp-keychain` helper can copy one allowlisted vault entry directly
+into macOS Keychain or Linux Secret Service without printing the value.
 
-> 🔓 **Requires client-side encryption (CSE) to be OFF.** This server only works with accounts where the Passwords app's client-side (end-to-end) encryption is **disabled**. See [Encryption requirement](#encryption-requirement) below.
+> ⚠️ **This project is AI-written.** Review the source and threat model before
+> pointing it at a real password vault. It is provided as-is, with no warranty.
 
-## Security model
+> 🔓 **Requires client-side encryption (CSE) to be off.** The Passwords API
+> returns plaintext to authenticated clients when CSE is disabled. This package
+> refuses accounts that require a CSE challenge.
 
-This is a password-manager bridge, so it is built defensively even though it can now write:
+## Security boundary
 
-- **Reads never bulk-expose secrets.** `list_passwords` and `search_passwords` return **metadata only** (label, username, URL, folder, timestamps). The plaintext secret, notes, and custom fields are stripped at a single choke point (`toPasswordMeta`). Only `get_password`, called with one specific id, ever returns a secret.
-- **Search ignores secrets.** Searching matches on label / username / URL only — never on the password, notes, or custom fields.
-- **Deletes are soft and reversible.** `delete_password` / `delete_folder` move items to the trash. They first fetch the item and **refuse if it is already trashed**, so this server can never permanently delete anything — empty the trash from the Passwords app if you really mean it.
-- **Updates never blank data.** `update_password` fetches the current entry, merges only the fields you passed, and sends the current `revision` — so an edit can't silently wipe fields, and the server rejects the write if the entry changed underneath it.
-- **Optional read-only mode.** Set `PASSWORDS_READONLY=true` to drop all six write tools from the tool list and refuse them at dispatch (defence in depth).
-- **HTTPS enforced.** Plaintext `http://` is refused unless you explicitly set `ALLOW_INSECURE_HTTP=true` (intended for localhost testing only).
-- **App-password auth.** Authenticates with a revocable Nextcloud app-password over HTTP Basic — never your real account password.
-- **Secrets never logged.** Debug logging (`DEBUG=1`) writes only method + path to stderr. Credentials, session tokens, and secret fields are never logged, cached, or written to disk.
-- **Minimal dependencies.** Only the official MCP SDK and `zod`. Networking uses Node's built-in `fetch`; requests carry a 30s timeout.
+The MCP surface is permanently metadata-only:
 
-None of this removes the underlying risk: an app-password that can read and write the vault gives any connected client the same power — reading every secret and modifying entries. Scope and rotate the app-password accordingly, and use `PASSWORDS_READONLY=true` if you only need lookups.
-
-## Encryption requirement
-
-The Nextcloud Passwords app supports two encryption modes:
-
-- **Server-side encryption (SSE)** — encrypted at rest; the server holds the keys and returns plaintext to any authenticated session. **Supported.**
-- **Client-side encryption (CSE)** — end-to-end encryption gated by a master password the server never sees. **Not supported.**
-
-This server implements none of the CSE (E2E) cryptography. On startup of each session it asks the server whether a challenge is required (`session/request`); if CSE is enabled it refuses to run with a clear error rather than returning ciphertext. To use this server, disable client-side encryption in the Passwords app settings.
-
-## Tools exposed (12; 6 in read-only mode)
-
-**Read** (always available):
-
-| Tool | Returns | Secret? |
-| --- | --- | --- |
-| `ping` | Connectivity check + item counts; confirms CSE is off | No |
-| `list_passwords` | All entries as metadata (optionally filtered by folder) | No |
-| `search_passwords` | Metadata for entries matching a label/username/URL substring | No |
-| `get_password` | A single entry incl. plaintext password, notes, custom fields | **Yes** |
-| `list_folders` | All folders | No |
-| `get_folder` | A single folder | No |
-
-**Write** (hidden when `PASSWORDS_READONLY=true`):
-
-| Tool | Does |
+| Tool | Result |
 | --- | --- |
-| `create_password` | Create an entry (label + password required; username/url/notes/folder/favorite optional) |
-| `update_password` | Change specific fields of an entry by id (merge; others preserved) |
-| `delete_password` | Move an entry to the trash (reversible; refuses if already trashed) |
-| `create_folder` | Create a folder (label required; optional parent) |
-| `update_folder` | Rename / re-parent a folder by id |
-| `delete_folder` | Move a folder and its contents to the trash (reversible; refuses if already trashed) |
+| `ping` | Connectivity and metadata counts |
+| `list_passwords` | Id, label, username, URL, folder, status, and timestamps |
+| `search_passwords` | The same metadata, matched only on label/username/URL |
+| `list_folders` | Folder metadata |
+| `get_folder` | One folder metadata record |
+
+There is no `get_password` tool and no mutation tool. This is not a runtime
+toggle: the handlers and schemas do not exist in the MCP registry.
+
+Additional controls:
+
+- The Nextcloud app-password is loaded from an OS credential reference. A
+  plaintext `NEXTCLOUD_APP_PASSWORD` environment variable is rejected.
+- Tool errors use fixed codes. Remote response bodies and unexpected exception
+  messages are never returned through MCP.
+- Keychain helper manifests contain references only, use a strict schema, and
+  are normalized by profile name. The CLI uses one OS-fixed path and rejects
+  caller-supplied paths, symlinks, non-owner files, hard links, and group/world
+  permissions.
+- The helper accepts only `install`; there is no show, print, export, or
+  arbitrary-command mode.
+- Credential values are passed to credential-store commands over stdin (hex
+  encoded inside macOS `security` interactive mode), never through argv or
+  environment variables. Secret buffers are zeroed after use where the runtime
+  permits it.
+- HTTPS is mandatory and redirects are refused.
+
+The Nextcloud `/password/list` endpoint itself returns full decrypted records.
+The server therefore receives secrets in its private process memory before
+projecting each record through the metadata allowlist. They are never serialized
+into an MCP result.
+
+### Host-access limitation
+
+This design prevents credentials from being returned through MCP or helper
+output. It does not make Keychain/libsecret unreadable to arbitrary code running
+as the same logged-in OS user. If an agent has unrestricted terminal access, it
+may be able to invoke the operating-system lookup utility directly.
+
+For a stronger boundary, run the helper as a separately permissioned broker and
+grant the agent only a narrow `install(profile)` IPC operation. On macOS, use a
+signed native broker with Keychain access controls. On Linux, use a separate
+service identity and service-scoped credentials or Secret Service collection.
 
 ## Install
 
-Build a tarball and install it globally:
-
 ```bash
 pnpm install
-pnpm pack:tarball          # produces passwords-mcp-<version>.tgz
-npm install -g ./passwords-mcp-0.2.0.tgz
+pnpm pack:tarball
+npm install -g ./passwords-mcp-0.3.0.tgz
 ```
 
-This installs the `passwords-mcp` command.
+This installs:
 
-## Configuration
+- `passwords-mcp` — metadata-only MCP server
+- `passwords-mcp-keychain` — out-of-band credential-store installer
 
-Add to your MCP client config (Claude Code shown):
+## Store the Nextcloud app-password
+
+Generate a dedicated, revocable app-password under Nextcloud
+Settings → Security → Devices & sessions.
+
+macOS:
+
+```bash
+/usr/bin/security add-generic-password \
+  -U \
+  -s 'nc-passwords-mcp:cloud.example.com' \
+  -a 'alice' \
+  -w
+```
+
+Enter the app-password at the interactive prompt. Do not put it on the command
+line.
+
+Linux with libsecret:
+
+```bash
+/usr/bin/secret-tool store \
+  --label='Nextcloud Passwords app password' \
+  application nc-passwords-mcp \
+  service 'nc-passwords-mcp:cloud.example.com' \
+  account 'alice'
+```
+
+## MCP configuration
+
+Configuration contains credential references, not values:
 
 ```json
 {
@@ -78,47 +117,93 @@ Add to your MCP client config (Claude Code shown):
       "command": "passwords-mcp",
       "args": [],
       "env": {
-        "NEXTCLOUD_URL": "https://your-nextcloud.example.com",
-        "NEXTCLOUD_USER": "your-username",
-        "NEXTCLOUD_APP_PASSWORD": "xxxx-xxxx-xxxx-xxxx-xxxx"
+        "NEXTCLOUD_URL": "https://cloud.example.com",
+        "NEXTCLOUD_USER": "alice",
+        "NEXTCLOUD_CREDENTIAL_SERVICE": "nc-passwords-mcp:cloud.example.com",
+        "NEXTCLOUD_CREDENTIAL_ACCOUNT": "alice"
       }
     }
   }
 }
 ```
 
-**Generate the app-password** in Nextcloud under Settings → Security → Devices & sessions → "Create new app password". The server only needs an app-password, never your real account password — and you can revoke it at any time without affecting your main login.
+## Copy an allowlisted entry into the credential store
 
-### Environment variables
+Create a reference-only manifest locally:
+
+```json
+{
+  "schema_version": 1,
+  "profiles": {
+    "github-production": {
+      "source_id": "00000000-0000-0000-0000-000000000001",
+      "destination": {
+        "service": "nc-passwords-mcp:github-production",
+        "account": "octocat"
+      }
+    }
+  }
+}
+```
+
+Install it at the fixed operator-controlled path with private permissions.
+
+macOS:
+
+```bash
+mkdir -m 700 "$HOME/Library/Application Support/passwords-mcp"
+install -m 600 passwords-install.json \
+  "$HOME/Library/Application Support/passwords-mcp/install-manifest.json"
+```
+
+Linux:
+
+```bash
+mkdir -m 700 "$HOME/.config/passwords-mcp"
+install -m 600 passwords-install.json \
+  "$HOME/.config/passwords-mcp/install-manifest.json"
+```
+
+Then select only the exact allowlisted profile:
+
+```bash
+passwords-mcp-keychain install \
+  --profile github-production
+```
+
+The helper fetches the exact Nextcloud entry, writes its password directly to
+the selected OS credential store, verifies the stored value, and returns only:
+
+```json
+{"ok":true,"operation":"install","profile":"github-production","destination":{"service":"nc-passwords-mcp:github-production","account":"octocat"}}
+```
+
+## Environment variables
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `NEXTCLOUD_URL` | yes | Instance base URL (no trailing slash). Must be `https://`. |
-| `NEXTCLOUD_USER` | yes | Nextcloud username. |
-| `NEXTCLOUD_APP_PASSWORD` | yes | A dedicated app-password. |
-| `PASSWORDS_READONLY` | no | Set to `true` to expose only the read tools and refuse all writes. |
-| `DEBUG` | no | Set to any value to log method + path to stderr (never secrets). |
-| `ALLOW_INSECURE_HTTP` | no | Set to `true` to permit plaintext `http://` (localhost testing only). |
+| `NEXTCLOUD_URL` | yes | Credential-free base URL; HTTPS by default |
+| `NEXTCLOUD_USER` | yes | Nextcloud username |
+| `NEXTCLOUD_CREDENTIAL_SERVICE` | yes | Exact OS credential-store service |
+| `NEXTCLOUD_CREDENTIAL_ACCOUNT` | yes | Exact OS credential-store account |
+| `DEBUG` | no | Log method and path only |
+
+`NEXTCLOUD_APP_PASSWORD` and `ALLOW_INSECURE_HTTP` are intentionally
+unsupported.
 
 ## Development
 
 ```bash
 pnpm install
-pnpm dev        # stdio MCP server; point the MCP inspector at it
-pnpm test       # unit tests (config validation + secret-stripping guarantees)
-pnpm lint       # eslint
-pnpm typecheck  # tsc --noEmit
-pnpm build      # tsc -> dist/
+pnpm test
+pnpm lint
+pnpm typecheck
+pnpm build
 ```
 
-The unit tests are pure and need no server. They assert the config validation rules, the write-payload builders (hash computation and the merge that preserves untouched fields), the read-only gating, and — most importantly — that metadata projection and search never expose secret fields.
+Tests use canary secrets to assert that metadata, error results, command
+arguments, manifests, and helper receipts do not expose credential values.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## Related
-
-- [Nextcloud Passwords](https://git.mdns.eu/nextcloud/passwords) and its [API reference](https://git.mdns.eu/nextcloud/passwords/-/wikis/Developers/Api/Index)
-- [Model Context Protocol](https://modelcontextprotocol.io)
-- [`@modelcontextprotocol/sdk`](https://www.npmjs.com/package/@modelcontextprotocol/sdk)

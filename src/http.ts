@@ -56,8 +56,6 @@ function parseRetryAfter(res: Response): number | null {
 // Error classes
 // -----------------------------------------------------------------------------
 
-const ERROR_BODY_MAX = 200;
-
 /** A failed HTTP response (non-2xx status). */
 export class HttpError extends Error {
   public readonly hint: string;
@@ -65,11 +63,9 @@ export class HttpError extends Error {
   constructor(
     public readonly status: number,
     public readonly statusText: string,
-    body: string,
   ) {
-    const snippet = body.length > ERROR_BODY_MAX ? `${body.slice(0, ERROR_BODY_MAX)}…` : body;
     const hint = httpHint(status);
-    super(`HTTP ${status} ${statusText}${snippet ? `: ${snippet}` : ''}${hint ? ` [${hint}]` : ''}`);
+    super(`HTTP ${status} ${statusText}${hint ? ` [${hint}]` : ''}`);
     this.name = 'HttpError';
     this.hint = hint;
   }
@@ -78,7 +74,7 @@ export class HttpError extends Error {
 function httpHint(status: number): string {
   switch (status) {
     case 401:
-      return 'Check NEXTCLOUD_USER / NEXTCLOUD_APP_PASSWORD — the app-password may be expired or revoked.';
+      return 'Check the Nextcloud username and credential-store reference; the app-password may be expired or revoked.';
     case 403:
       return 'Forbidden — the app-password lacks permission, or a session could not be established.';
     case 404:
@@ -121,15 +117,17 @@ export class PasswordsClient {
   private readonly authHeader: string;
   private session: string | null = null;
 
-  constructor(private readonly config: Config) {
-    const token = Buffer.from(`${config.user}:${config.password}`, 'utf8').toString('base64');
+  constructor(
+    private readonly config: Config,
+    appPassword: Buffer,
+  ) {
+    const prefix = Buffer.from(`${config.user}:`, 'utf8');
+    const credentials = Buffer.concat([prefix, appPassword]);
+    const token = credentials.toString('base64');
+    credentials.fill(0);
+    prefix.fill(0);
+    appPassword.fill(0);
     this.authHeader = `Basic ${token}`;
-    if (this.config.allowInsecureHttp && config.url.startsWith('http://')) {
-      process.stderr.write(
-        '[passwords-mcp] WARNING: connecting over plaintext http:// — ' +
-          'credentials and secrets are sent unencrypted. Localhost testing only.\n',
-      );
-    }
   }
 
   private apiUrl(path: string): string {
@@ -158,7 +156,7 @@ export class PasswordsClient {
       const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       let res: Response;
       try {
-        res = await fetch(url, { ...init, signal: controller.signal });
+        res = await fetch(url, { ...init, redirect: 'error', signal: controller.signal });
       } finally {
         clearTimeout(timer);
       }
@@ -167,12 +165,12 @@ export class PasswordsClient {
         if (isRetryable(res.status) && attempt < MAX_RETRIES) {
           const retryDelay = parseRetryAfter(res);
           if (retryDelay !== null) await sleep(retryDelay);
-          const text = await res.text().catch(() => '');
-          lastError = new HttpError(res.status, res.statusText, text);
+          await res.text().catch(() => '');
+          lastError = new HttpError(res.status, res.statusText);
           continue;
         }
-        const text = await res.text().catch(() => '');
-        throw new HttpError(res.status, res.statusText, text);
+        await res.text().catch(() => '');
+        throw new HttpError(res.status, res.statusText);
       }
       return res;
     }

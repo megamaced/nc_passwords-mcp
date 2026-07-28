@@ -2,30 +2,38 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { loadConfig } from './config.js';
-import {
-  buildPasswordCreate,
-  buildPasswordUpdate,
-  passwordMatches,
-  sha1,
-} from './api.js';
-import { listTools } from './tools.js';
+import { passwordMatches } from './api.js';
+import type { PasswordsClient } from './http.js';
+import { dispatchTool, listTools } from './tools.js';
 import { toPasswordMeta, type Password } from './types.js';
 
 const BASE_ENV = {
   NEXTCLOUD_URL: 'https://cloud.example.com',
   NEXTCLOUD_USER: 'alice',
-  NEXTCLOUD_APP_PASSWORD: 'aaaa-bbbb-cccc-dddd',
+  NEXTCLOUD_CREDENTIAL_SERVICE: 'nc-passwords-mcp:cloud.example.com',
+  NEXTCLOUD_CREDENTIAL_ACCOUNT: 'alice',
 } as NodeJS.ProcessEnv;
 
 // -----------------------------------------------------------------------------
 // config
 // -----------------------------------------------------------------------------
 
-test('loadConfig requires all three variables', () => {
+test('loadConfig requires URL, user, and credential reference variables', () => {
   assert.throws(() => loadConfig({} as NodeJS.ProcessEnv), /Missing required/);
   assert.throws(
     () => loadConfig({ NEXTCLOUD_URL: 'https://x', NEXTCLOUD_USER: 'a' } as NodeJS.ProcessEnv),
-    /NEXTCLOUD_APP_PASSWORD/,
+    /NEXTCLOUD_CREDENTIAL_SERVICE/,
+  );
+});
+
+test('loadConfig rejects a plaintext app-password environment variable', () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        ...BASE_ENV,
+        NEXTCLOUD_APP_PASSWORD: 'must-not-be-accepted',
+      }),
+    /plaintext credential environment variables are forbidden/i,
   );
 });
 
@@ -34,27 +42,35 @@ test('loadConfig strips trailing slashes from the URL', () => {
   assert.equal(cfg.url, 'https://cloud.example.com');
 });
 
-test('loadConfig refuses http:// by default', () => {
-  assert.throws(
-    () => loadConfig({ ...BASE_ENV, NEXTCLOUD_URL: 'http://cloud.example.com' }),
-    /Refusing to send credentials over plaintext/,
-  );
+test('loadConfig rejects URL credentials, query strings, and fragments', () => {
+  for (const url of [
+    'https://alice:secret@cloud.example.com',
+    'https://cloud.example.com?token=secret',
+    'https://cloud.example.com#secret',
+  ]) {
+    assert.throws(
+      () => loadConfig({ ...BASE_ENV, NEXTCLOUD_URL: url }),
+      /credential-free HTTPS origin/i,
+    );
+  }
 });
 
-test('loadConfig allows http:// only with the explicit opt-in', () => {
-  const cfg = loadConfig({
-    ...BASE_ENV,
-    NEXTCLOUD_URL: 'http://localhost:8080',
-    ALLOW_INSECURE_HTTP: 'true',
-  });
-  assert.equal(cfg.url, 'http://localhost:8080');
-  assert.equal(cfg.allowInsecureHttp, true);
+test('loadConfig refuses http:// even when the legacy override is set', () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        ...BASE_ENV,
+        NEXTCLOUD_URL: 'http://localhost:8080',
+        ALLOW_INSECURE_HTTP: 'true',
+      }),
+    /must use https/i,
+  );
 });
 
 test('loadConfig rejects non-http(s) schemes', () => {
   assert.throws(
     () => loadConfig({ ...BASE_ENV, NEXTCLOUD_URL: 'ftp://cloud.example.com' }),
-    /must use http or https/,
+    /must use https/i,
   );
 });
 
@@ -132,70 +148,27 @@ test('passwordMatches treats an empty query as match-all', () => {
 });
 
 // -----------------------------------------------------------------------------
-// write payload builders
+// metadata-only tool surface
 // -----------------------------------------------------------------------------
 
-test('sha1 produces the expected hex digest', () => {
-  // Known SHA-1 of the empty string and of "abc".
-  assert.equal(sha1(''), 'da39a3ee5e6b4b0d3255bfef95601890afd80709');
-  assert.equal(sha1('abc'), 'a9993e364706816aba3e25717850c26c9cd0d89d');
+test('listTools exposes metadata tools only', () => {
+  assert.deepEqual(
+    listTools().map((tool) => tool.name),
+    ['ping', 'list_passwords', 'search_passwords', 'list_folders', 'get_folder'],
+  );
 });
 
-test('buildPasswordCreate defaults optional fields and pins cseType none', () => {
-  const payload = buildPasswordCreate({ label: 'X', password: 'secret' });
-  assert.equal(payload.label, 'X');
-  assert.equal(payload.password, 'secret');
-  assert.equal(payload.username, '');
-  assert.equal(payload.url, '');
-  assert.equal(payload.notes, '');
-  assert.equal(payload.favorite, false);
-  assert.equal(payload.cseType, 'none');
-  assert.equal(payload.hash, sha1('secret'));
-});
-
-test('buildPasswordUpdate merges changes over current and preserves the rest', () => {
-  const current = samplePassword();
-  const payload = buildPasswordUpdate(current, { label: 'GitLab' });
-  // changed
-  assert.equal(payload.label, 'GitLab');
-  // preserved from current (NOT blanked)
-  assert.equal(payload.password, current.password);
-  assert.equal(payload.username, current.username);
-  assert.equal(payload.url, current.url);
-  assert.equal(payload.notes, current.notes);
-  assert.equal(payload.customFields, current.customFields);
-  // safety fields
-  assert.equal(payload.id, current.id);
-  assert.equal(payload.revision, current.revision);
-  assert.equal(payload.cseType, 'none');
-});
-
-test('buildPasswordUpdate recomputes the hash when the password changes', () => {
-  const payload = buildPasswordUpdate(samplePassword(), { password: 'new-secret' });
-  assert.equal(payload.password, 'new-secret');
-  assert.equal(payload.hash, sha1('new-secret'));
-});
-
-// -----------------------------------------------------------------------------
-// read-only gating
-// -----------------------------------------------------------------------------
-
-test('listTools exposes writes only when not read-only', () => {
-  const writeNames = [
-    'create_password',
-    'update_password',
-    'delete_password',
-    'create_folder',
-    'update_folder',
-    'delete_folder',
-  ];
-
-  const rw = listTools(false).map((t) => t.name);
-  for (const n of writeNames) assert.ok(rw.includes(n), `read/write mode should expose ${n}`);
-  assert.equal(rw.length, 12);
-
-  const ro = listTools(true).map((t) => t.name);
-  for (const n of writeNames) assert.ok(!ro.includes(n), `read-only mode must hide ${n}`);
-  assert.equal(ro.length, 6);
-  assert.ok(ro.includes('get_password'), 'read tools remain in read-only mode');
+test('dispatch replaces unexpected secret-bearing errors with a fixed code', async () => {
+  const client = {
+    apiJson: async () => {
+      throw new Error('remote body contained canary-secret');
+    },
+  } as unknown as PasswordsClient;
+  const result = await dispatchTool('list_passwords', {}, {
+    client,
+    configSummary: 'https://cloud.example.com as alice',
+  });
+  const serialised = JSON.stringify(result);
+  assert.ok(!serialised.includes('canary-secret'));
+  assert.match(serialised, /OPERATION_FAILED/);
 });
