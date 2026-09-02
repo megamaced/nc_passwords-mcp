@@ -3,13 +3,21 @@ import { test } from 'node:test';
 
 import { loadConfig } from './config.js';
 import {
+  buildFolderUpdate,
   buildPasswordCreate,
   buildPasswordUpdate,
   passwordMatches,
   sha1,
 } from './api.js';
 import { listTools } from './tools.js';
-import { toPasswordMeta, type Password } from './types.js';
+import {
+  CustomFieldError,
+  serializeCustomFields,
+  toFolderMeta,
+  toPasswordMeta,
+  type Folder,
+  type Password,
+} from './types.js';
 
 const BASE_ENV = {
   NEXTCLOUD_URL: 'https://cloud.example.com',
@@ -51,11 +59,61 @@ test('loadConfig allows http:// only with the explicit opt-in', () => {
   assert.equal(cfg.allowInsecureHttp, true);
 });
 
+test('loadConfig confines the http:// opt-in to loopback hosts', () => {
+  for (const host of ['localhost', '127.0.0.1', '127.1.2.3', '[::1]']) {
+    const cfg = loadConfig({
+      ...BASE_ENV,
+      NEXTCLOUD_URL: `http://${host}:8080`,
+      ALLOW_INSECURE_HTTP: 'true',
+    });
+    assert.equal(cfg.allowInsecureHttp, true, `${host} should be permitted`);
+  }
+  for (const host of ['cloud.example.com', '10.0.0.5', 'localhost.evil.example']) {
+    assert.throws(
+      () =>
+        loadConfig({
+          ...BASE_ENV,
+          NEXTCLOUD_URL: `http://${host}`,
+          ALLOW_INSECURE_HTTP: 'true',
+        }),
+      /only permits a loopback host/,
+      `${host} must be refused even with the opt-in`,
+    );
+  }
+});
+
 test('loadConfig rejects non-http(s) schemes', () => {
   assert.throws(
     () => loadConfig({ ...BASE_ENV, NEXTCLOUD_URL: 'ftp://cloud.example.com' }),
     /must use http or https/,
   );
+});
+
+test('loadConfig rejects credentials, queries and fragments in the URL', () => {
+  assert.throws(
+    () => loadConfig({ ...BASE_ENV, NEXTCLOUD_URL: 'https://bob:hunter2@cloud.example.com' }),
+    /must not embed credentials/,
+  );
+  assert.throws(
+    () => loadConfig({ ...BASE_ENV, NEXTCLOUD_URL: 'https://cloud.example.com/?a=1' }),
+    /must not include a query string or fragment/,
+  );
+  assert.throws(
+    () => loadConfig({ ...BASE_ENV, NEXTCLOUD_URL: 'https://cloud.example.com/#frag' }),
+    /must not include a query string or fragment/,
+  );
+});
+
+test('loadConfig rejects a username that would break the Basic credential pair', () => {
+  assert.throws(
+    () => loadConfig({ ...BASE_ENV, NEXTCLOUD_USER: 'alice:bob' }),
+    /free of colons and control characters/,
+  );
+  assert.throws(
+    () => loadConfig({ ...BASE_ENV, NEXTCLOUD_USER: 'alice\r\nX-Evil: 1' }),
+    /free of colons and control characters/,
+  );
+  assert.throws(() => loadConfig({ ...BASE_ENV, NEXTCLOUD_USER: '   ' }), /must be non-empty/);
 });
 
 // -----------------------------------------------------------------------------
@@ -89,6 +147,24 @@ function samplePassword(overrides: Partial<Password> = {}): Password {
   };
 }
 
+function sampleFolder(overrides: Partial<Folder> = {}): Folder {
+  return {
+    id: 'f-1',
+    revision: 'rev-9',
+    label: 'Macebox',
+    parent: '00000000-0000-0000-0000-000000000000',
+    cseType: 'none',
+    sseType: 'SSEv1r2',
+    edited: 1,
+    created: 2,
+    updated: 3,
+    favorite: false,
+    hidden: false,
+    trashed: false,
+    ...overrides,
+  };
+}
+
 test('toPasswordMeta omits every secret-bearing field', () => {
   const meta = toPasswordMeta(samplePassword());
   const serialised = JSON.stringify(meta);
@@ -107,6 +183,39 @@ test('toPasswordMeta keeps identifying metadata', () => {
   assert.equal(meta.label, 'GitHub');
   assert.equal(meta.username, 'octocat');
   assert.equal(meta.url, 'https://github.com');
+});
+
+test('toFolderMeta pins the emitted shape and drops unmodelled server fields', () => {
+  const folder = {
+    id: 'f-1',
+    revision: 'rev-9',
+    label: 'Macebox',
+    parent: '00000000-0000-0000-0000-000000000000',
+    cseType: 'none',
+    sseType: 'SSEv1r2',
+    edited: 1,
+    created: 2,
+    updated: 3,
+    favorite: false,
+    hidden: false,
+    trashed: false,
+    // A field the server might start returning that this project has not vetted.
+    unexpectedFutureField: 'must not be forwarded',
+  } as unknown as Folder;
+
+  const meta = toFolderMeta(folder);
+  assert.deepEqual(Object.keys(meta).sort(), [
+    'created',
+    'edited',
+    'favorite',
+    'hidden',
+    'id',
+    'label',
+    'parent',
+    'trashed',
+    'updated',
+  ]);
+  assert.ok(!JSON.stringify(meta).includes('must not be forwarded'));
 });
 
 // -----------------------------------------------------------------------------
@@ -185,17 +294,156 @@ test('listTools exposes writes only when not read-only', () => {
     'create_password',
     'update_password',
     'delete_password',
+    'restore_password',
     'create_folder',
     'update_folder',
     'delete_folder',
+    'restore_folder',
   ];
 
   const rw = listTools(false).map((t) => t.name);
   for (const n of writeNames) assert.ok(rw.includes(n), `read/write mode should expose ${n}`);
-  assert.equal(rw.length, 12);
+  assert.equal(rw.length, 14);
 
   const ro = listTools(true).map((t) => t.name);
   for (const n of writeNames) assert.ok(!ro.includes(n), `read-only mode must hide ${n}`);
   assert.equal(ro.length, 6);
   assert.ok(ro.includes('get_password'), 'read tools remain in read-only mode');
+});
+
+// -----------------------------------------------------------------------------
+// MCP tool annotations
+// -----------------------------------------------------------------------------
+
+test('every tool carries deliberate MCP annotations', () => {
+  const readOnlyTools = new Set([
+    'ping',
+    'list_passwords',
+    'search_passwords',
+    'get_password',
+    'list_folders',
+    'get_folder',
+  ]);
+
+  for (const tool of listTools(false)) {
+    const a = tool.annotations;
+    assert.ok(a, `${tool.name} must declare annotations`);
+    assert.equal(typeof a.title, 'string', `${tool.name} needs a human-readable title`);
+    assert.equal(
+      a.readOnlyHint,
+      readOnlyTools.has(tool.name),
+      `${tool.name} has the wrong readOnlyHint`,
+    );
+    // Every tool talks to a remote Nextcloud instance.
+    assert.equal(a.openWorldHint, true, `${tool.name} must set openWorldHint`);
+    if (!readOnlyTools.has(tool.name)) {
+      assert.equal(typeof a.destructiveHint, 'boolean', `${tool.name} needs a destructiveHint`);
+      assert.equal(a.idempotentHint, false, `${tool.name} must not claim idempotence`);
+    }
+  }
+});
+
+// -----------------------------------------------------------------------------
+// update payloads must not reset state the caller did not mention
+// -----------------------------------------------------------------------------
+
+test('buildPasswordUpdate preserves hidden state when another field changes', () => {
+  const current = samplePassword({ hidden: true, favorite: true });
+  const payload = buildPasswordUpdate(current, { label: 'GitLab' });
+  // The API defaults hidden/favorite to false, so omitting them would unhide
+  // the entry and clear the favourite flag as a side effect of a rename.
+  assert.equal(payload.hidden, true);
+  assert.equal(payload.favorite, true);
+});
+
+test('buildPasswordUpdate still allows hidden and favorite to be changed', () => {
+  const payload = buildPasswordUpdate(samplePassword({ hidden: true, favorite: true }), {
+    hidden: false,
+    favorite: false,
+  });
+  assert.equal(payload.hidden, false);
+  assert.equal(payload.favorite, false);
+});
+
+test('buildFolderUpdate preserves hidden and favorite across a rename', () => {
+  const current = sampleFolder({ hidden: true, favorite: true });
+  const payload = buildFolderUpdate(current, { label: 'Renamed' });
+  assert.equal(payload.label, 'Renamed');
+  assert.equal(payload.hidden, true);
+  assert.equal(payload.favorite, true);
+  assert.equal(payload.parent, current.parent);
+  assert.equal(payload.revision, current.revision);
+});
+
+test('buildFolderUpdate still allows hidden and favorite to be changed', () => {
+  const payload = buildFolderUpdate(sampleFolder({ hidden: true, favorite: true }), {
+    hidden: false,
+    favorite: false,
+  });
+  assert.equal(payload.hidden, false);
+  assert.equal(payload.favorite, false);
+});
+
+// -----------------------------------------------------------------------------
+// custom fields
+// -----------------------------------------------------------------------------
+
+test('custom fields round-trip through create and update', () => {
+  const fields = [
+    { label: 'PIN', type: 'secret' as const, value: '9999' },
+    { label: 'Contact', type: 'email' as const, value: 'ops@example.com' },
+  ];
+
+  const created = buildPasswordCreate({ label: 'X', password: 's', customFields: fields });
+  assert.deepEqual(JSON.parse(created.customFields as string), fields);
+
+  const updated = buildPasswordUpdate(samplePassword(), { customFields: fields });
+  assert.deepEqual(JSON.parse(updated.customFields as string), fields);
+});
+
+test('buildPasswordUpdate keeps existing custom fields when none are supplied', () => {
+  const current = samplePassword();
+  const payload = buildPasswordUpdate(current, { label: 'Other' });
+  assert.equal(payload.customFields, current.customFields);
+});
+
+test('buildPasswordCreate serialises an empty custom field set, never undefined', () => {
+  assert.equal(buildPasswordCreate({ label: 'X', password: 's' }).customFields, '[]');
+});
+
+test('serializeCustomFields enforces the documented API limits', () => {
+  assert.throws(
+    () =>
+      serializeCustomFields(
+        Array.from({ length: 21 }, (_, i) => ({
+          label: `f${i}`,
+          type: 'text' as const,
+          value: 'v',
+        })),
+      ),
+    CustomFieldError,
+  );
+  assert.throws(
+    () => serializeCustomFields([{ label: 'x'.repeat(49), type: 'text', value: 'v' }]),
+    CustomFieldError,
+  );
+  assert.throws(
+    () => serializeCustomFields([{ label: 'ok', type: 'text', value: 'v'.repeat(321) }]),
+    CustomFieldError,
+  );
+  assert.throws(
+    () => serializeCustomFields([{ label: '', type: 'text', value: 'v' }]),
+    CustomFieldError,
+  );
+});
+
+test('an oversized custom field is reported without echoing its value', () => {
+  const secret = 'leaked-secret-'.repeat(40);
+  try {
+    serializeCustomFields([{ label: 'PIN', type: 'secret', value: secret }]);
+    assert.fail('expected a CustomFieldError');
+  } catch (err) {
+    assert.ok(err instanceof CustomFieldError);
+    assert.ok(!err.message.includes(secret), 'the field value must not reach the error message');
+  }
 });

@@ -8,7 +8,10 @@ import {
   HttpError,
   listFolders,
   listPasswords,
+  NotTrashedError,
   passwordMatches,
+  restoreFolder,
+  restorePassword,
   showFolder,
   showPassword,
   trashFolder,
@@ -16,8 +19,12 @@ import {
   updateFolder,
   updatePassword,
 } from './api.js';
-import { CseUnsupportedError, type PasswordsClient } from './http.js';
-import { toPasswordMeta } from './types.js';
+import {
+  CseUnsupportedError,
+  WriteOutcomeUnknownError,
+  type PasswordsClient,
+} from './http.js';
+import { CUSTOM_FIELD_TYPES, CustomFieldError, toFolderMeta, toPasswordMeta } from './types.js';
 
 export interface Context {
   client: PasswordsClient;
@@ -36,6 +43,44 @@ interface ToolDef<S extends ZodTypeAny> {
 
 const Empty = z.object({}).strict();
 
+/**
+ * Custom fields are accepted as structured objects rather than a pre-serialized
+ * JSON string, so a malformed or oversized blob can never reach the vault —
+ * `serializeCustomFields` validates and encodes them centrally.
+ */
+const CustomFieldsArg = z
+  .array(
+    z
+      .object({
+        label: z.string().min(1, 'label is required'),
+        type: z.enum(CUSTOM_FIELD_TYPES),
+        value: z.string(),
+      })
+      .strict(),
+  )
+  .describe('Replaces ALL custom fields on the entry — send the full set, not a delta.');
+
+const CUSTOM_FIELDS_SCHEMA = {
+  type: 'array',
+  description:
+    'User-defined fields. Replaces ALL existing custom fields, so send the ' +
+    'complete set. Max 20 fields; label <= 48 chars, value <= 320 chars.',
+  items: {
+    type: 'object',
+    properties: {
+      label: { type: 'string', description: 'Field name.' },
+      type: {
+        type: 'string',
+        enum: [...CUSTOM_FIELD_TYPES],
+        description: "Field kind; 'secret' marks password-grade material.",
+      },
+      value: { type: 'string' },
+    },
+    required: ['label', 'type', 'value'],
+    additionalProperties: false,
+  },
+} as const;
+
 function jsonResult(data: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
 }
@@ -48,24 +93,37 @@ function textResult(text: string): CallToolResult {
 // Read tools
 // -----------------------------------------------------------------------------
 
+/**
+ * Connectivity check only.
+ *
+ * This deliberately does NOT list passwords. With CSE disabled the
+ * `password/list` model carries decrypted `password`, `notes` and
+ * `customFields` for every entry, so counting the vault would pull the entire
+ * plaintext store into this process for a result that reports no counts at all.
+ * The session handshake plus `session/keepalive` proves URL, credentials, app
+ * availability and CSE state without reading a single secret. Use
+ * list_passwords / list_folders if counts are actually wanted.
+ */
 const ping: ToolDef<typeof Empty> = {
   argsSchema: Empty,
   tool: {
     name: 'ping',
     description:
-      'Verify connectivity to the configured Nextcloud Passwords instance, ' +
-      'confirm client-side encryption is disabled, and report how many ' +
-      'passwords and folders are visible.',
+      'Verify connectivity to the configured Nextcloud Passwords instance: ' +
+      'that the URL and app-password work, the Passwords app is installed, and ' +
+      'client-side encryption is disabled. Reads no vault data.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: {
+      title: 'Check Passwords connectivity',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
   },
   handler: async (_args, ctx) => {
-    const [passwords, folders] = await Promise.all([
-      listPasswords(ctx.client),
-      listFolders(ctx.client),
-    ]);
+    await ctx.client.checkConnectivity();
     return textResult(
       `OK — connected to ${ctx.configSummary} (${ctx.readOnly ? 'read-only' : 'read/write'}); ` +
-        `${passwords.length} password(s), ${folders.length} folder(s) visible.`,
+        `client-side encryption is disabled.`,
     );
   },
 };
@@ -93,6 +151,11 @@ const listPasswordsTool: ToolDef<typeof ListPasswordsArgs> = {
         folder: { type: 'string', description: 'Optional folder id to filter by.' },
       },
       additionalProperties: false,
+    },
+    annotations: {
+      title: 'List passwords (metadata only)',
+      readOnlyHint: true,
+      openWorldHint: true,
     },
   },
   handler: async (args, ctx) => {
@@ -123,6 +186,11 @@ const searchPasswordsTool: ToolDef<typeof SearchPasswordsArgs> = {
       },
       required: ['query'],
       additionalProperties: false,
+    },
+    annotations: {
+      title: 'Search passwords (metadata only)',
+      readOnlyHint: true,
+      openWorldHint: true,
     },
   },
   handler: async (args, ctx) => {
@@ -155,6 +223,14 @@ const getPasswordTool: ToolDef<typeof GetPasswordArgs> = {
       required: ['id'],
       additionalProperties: false,
     },
+    // readOnlyHint is about side effects, not sensitivity: this reads without
+    // mutating, but it is the one tool that discloses a plaintext secret. The
+    // warning belongs in the description, which clients show to the user.
+    annotations: {
+      title: 'Reveal one password (plaintext secret)',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
   },
   handler: async (args, ctx) => {
     const p = await showPassword(ctx.client, args.id);
@@ -182,8 +258,10 @@ const listFoldersTool: ToolDef<typeof Empty> = {
       'List all folders (id, label, parent folder id, timestamps). Folders hold ' +
       'no secret material. Use a folder id with list_passwords to filter.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: { title: 'List folders', readOnlyHint: true, openWorldHint: true },
   },
-  handler: async (_args, ctx) => jsonResult(await listFolders(ctx.client)),
+  handler: async (_args, ctx) =>
+    jsonResult((await listFolders(ctx.client)).map(toFolderMeta)),
 };
 
 const GetFolderArgs = z.object({ id: z.string().min(1, 'id is required') }).strict();
@@ -199,8 +277,9 @@ const getFolderTool: ToolDef<typeof GetFolderArgs> = {
       required: ['id'],
       additionalProperties: false,
     },
+    annotations: { title: 'Get one folder', readOnlyHint: true, openWorldHint: true },
   },
-  handler: async (args, ctx) => jsonResult(await showFolder(ctx.client, args.id)),
+  handler: async (args, ctx) => jsonResult(toFolderMeta(await showFolder(ctx.client, args.id))),
 };
 
 // -----------------------------------------------------------------------------
@@ -216,6 +295,8 @@ const CreatePasswordArgs = z
     notes: z.string().optional(),
     folder: z.string().optional().describe('Folder id to file it under; omit for the base folder.'),
     favorite: z.boolean().optional(),
+    hidden: z.boolean().optional().describe('Hide the entry from list/search actions.'),
+    customFields: CustomFieldsArg.optional(),
   })
   .strict();
 
@@ -238,9 +319,23 @@ const createPasswordTool: ToolDef<typeof CreatePasswordArgs> = {
         notes: { type: 'string' },
         folder: { type: 'string', description: 'Folder id; omit for the base folder.' },
         favorite: { type: 'boolean' },
+        hidden: {
+          type: 'boolean',
+          description: 'Hide the entry from list/search actions (default false).',
+        },
+        customFields: CUSTOM_FIELDS_SCHEMA,
       },
       required: ['label', 'password'],
       additionalProperties: false,
+    },
+    annotations: {
+      title: 'Create a password',
+      readOnlyHint: false,
+      // Additive: it never overwrites or removes an existing entry, but calling
+      // it twice creates two entries.
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
     },
   },
   handler: async (args, ctx) => jsonResult(await createPassword(ctx.client, args)),
@@ -256,19 +351,13 @@ const UpdatePasswordArgs = z
     notes: z.string().optional(),
     folder: z.string().optional(),
     favorite: z.boolean().optional(),
+    hidden: z.boolean().optional(),
+    customFields: CustomFieldsArg.optional(),
   })
   .strict()
-  .refine(
-    (a) =>
-      a.label !== undefined ||
-      a.password !== undefined ||
-      a.username !== undefined ||
-      a.url !== undefined ||
-      a.notes !== undefined ||
-      a.folder !== undefined ||
-      a.favorite !== undefined,
-    { message: 'provide at least one field to change besides id' },
-  );
+  .refine((a) => Object.keys(a).some((k) => k !== 'id'), {
+    message: 'provide at least one field to change besides id',
+  });
 
 const updatePasswordTool: ToolDef<typeof UpdatePasswordArgs> = {
   write: true,
@@ -277,8 +366,11 @@ const updatePasswordTool: ToolDef<typeof UpdatePasswordArgs> = {
     name: 'update_password',
     description:
       'Update fields of an existing password by id. Only the fields you pass are ' +
-      'changed; all others are preserved (the server rejects the write if the ' +
-      'entry changed underneath us). Provide at least one field besides id.',
+      'changed; all others — including hidden/favorite state and custom fields — ' +
+      'are preserved (the server rejects the write if the entry changed ' +
+      'underneath us). Note that customFields REPLACES the whole set. Tags are ' +
+      'left untouched and cannot be edited through this server. Provide at ' +
+      'least one field besides id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -290,9 +382,20 @@ const updatePasswordTool: ToolDef<typeof UpdatePasswordArgs> = {
         notes: { type: 'string' },
         folder: { type: 'string' },
         favorite: { type: 'boolean' },
+        hidden: { type: 'boolean', description: 'Hide/unhide the entry.' },
+        customFields: CUSTOM_FIELDS_SCHEMA,
       },
       required: ['id'],
       additionalProperties: false,
+    },
+    annotations: {
+      title: 'Update a password',
+      readOnlyHint: false,
+      // Overwrites values the user may not be able to recover from the UI, and
+      // each call consumes the revision it was built against.
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
   },
   handler: async (args, ctx) => {
@@ -318,6 +421,15 @@ const deletePasswordTool: ToolDef<typeof DeletePasswordArgs> = {
       required: ['id'],
       additionalProperties: false,
     },
+    annotations: {
+      title: 'Move a password to the trash',
+      readOnlyHint: false,
+      // Reversible via restore_password, but it removes the entry from every
+      // list/search until someone restores it — treat it as destructive.
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   handler: async (args, ctx) => {
     await trashPassword(ctx.client, args.id);
@@ -329,6 +441,8 @@ const CreateFolderArgs = z
   .object({
     label: z.string().min(1, 'label is required'),
     parent: z.string().optional().describe('Parent folder id; omit for the base folder.'),
+    favorite: z.boolean().optional(),
+    hidden: z.boolean().optional().describe('Hide the folder and its contents from list actions.'),
   })
   .strict();
 
@@ -343,12 +457,24 @@ const createFolderTool: ToolDef<typeof CreateFolderArgs> = {
       properties: {
         label: { type: 'string', description: 'Folder label (required).' },
         parent: { type: 'string', description: 'Parent folder id; omit for the base folder.' },
+        favorite: { type: 'boolean' },
+        hidden: {
+          type: 'boolean',
+          description: 'Hide the folder and its contents from list actions (default false).',
+        },
       },
       required: ['label'],
       additionalProperties: false,
     },
+    annotations: {
+      title: 'Create a folder',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
-  handler: async (args, ctx) => jsonResult(await createFolder(ctx.client, args.label, args.parent)),
+  handler: async (args, ctx) => jsonResult(await createFolder(ctx.client, args)),
 };
 
 const UpdateFolderArgs = z
@@ -356,10 +482,12 @@ const UpdateFolderArgs = z
     id: z.string().min(1, 'id is required'),
     label: z.string().optional(),
     parent: z.string().optional(),
+    favorite: z.boolean().optional(),
+    hidden: z.boolean().optional(),
   })
   .strict()
-  .refine((a) => a.label !== undefined || a.parent !== undefined, {
-    message: 'provide a label and/or parent to change',
+  .refine((a) => Object.keys(a).some((k) => k !== 'id'), {
+    message: 'provide at least one field to change besides id',
   });
 
 const updateFolderTool: ToolDef<typeof UpdateFolderArgs> = {
@@ -367,16 +495,31 @@ const updateFolderTool: ToolDef<typeof UpdateFolderArgs> = {
   argsSchema: UpdateFolderArgs,
   tool: {
     name: 'update_folder',
-    description: 'Rename a folder and/or move it under a different parent, by id.',
+    description:
+      'Rename a folder, move it under a different parent, or change its ' +
+      'favorite/hidden state, by id. Fields you do not pass keep their current ' +
+      'value. Hiding a folder also hides everything inside it.',
     inputSchema: {
       type: 'object',
       properties: {
         id: { type: 'string', description: 'Id of the folder to update (required).' },
         label: { type: 'string' },
         parent: { type: 'string', description: 'New parent folder id.' },
+        favorite: { type: 'boolean' },
+        hidden: {
+          type: 'boolean',
+          description: 'Hide/unhide the folder. Hiding also hides its contents.',
+        },
       },
       required: ['id'],
       additionalProperties: false,
+    },
+    annotations: {
+      title: 'Update a folder',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
   },
   handler: async (args, ctx) => {
@@ -401,6 +544,15 @@ const deleteFolderTool: ToolDef<typeof DeleteFolderArgs> = {
       required: ['id'],
       additionalProperties: false,
     },
+    annotations: {
+      title: 'Move a folder to the trash',
+      readOnlyHint: false,
+      // Reversible, but it takes every password inside the folder out of view
+      // along with it — the most far-reaching write this server offers.
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   handler: async (args, ctx) => {
     await trashFolder(ctx.client, args.id);
@@ -409,30 +561,115 @@ const deleteFolderTool: ToolDef<typeof DeleteFolderArgs> = {
 };
 
 // -----------------------------------------------------------------------------
+// Restore tools — the undo for the soft deletes above.
+//
+// Both restore FROM TRASH only. The API's restore action can also roll a record
+// back to an arbitrary earlier revision, which would discard changes the user
+// never asked to lose; that is deliberately not exposed here.
+// -----------------------------------------------------------------------------
+
+const RestorePasswordArgs = z.object({ id: z.string().min(1, 'id is required') }).strict();
+
+const restorePasswordTool: ToolDef<typeof RestorePasswordArgs> = {
+  write: true,
+  argsSchema: RestorePasswordArgs,
+  tool: {
+    name: 'restore_password',
+    description:
+      'Restore a trashed password, undoing delete_password. Only takes the entry ' +
+      'out of the trash — it never rolls the entry back to an older revision. ' +
+      'Reports an error if the password is not in the trash.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Id of the trashed password.' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    annotations: {
+      title: 'Restore a password from the trash',
+      readOnlyHint: false,
+      destructiveHint: false,
+      // Restoring an already-restored entry is refused rather than repeated, so
+      // this is not idempotent in the "safe to replay" sense.
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  handler: async (args, ctx) => {
+    const result = await restorePassword(ctx.client, args.id);
+    return textResult(
+      `Restored password ${args.id} from the trash (new revision ${result.revision ?? 'unknown'}).`,
+    );
+  },
+};
+
+const RestoreFolderArgs = z.object({ id: z.string().min(1, 'id is required') }).strict();
+
+const restoreFolderTool: ToolDef<typeof RestoreFolderArgs> = {
+  write: true,
+  argsSchema: RestoreFolderArgs,
+  tool: {
+    name: 'restore_folder',
+    description:
+      'Restore a trashed folder, undoing delete_folder. Only takes the folder out ' +
+      'of the trash — it never rolls it back to an older revision. Reports an ' +
+      'error if the folder is not in the trash.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Id of the trashed folder.' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    annotations: {
+      title: 'Restore a folder from the trash',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  handler: async (args, ctx) => {
+    const result = await restoreFolder(ctx.client, args.id);
+    return textResult(
+      `Restored folder ${args.id} from the trash (new revision ${result.revision ?? 'unknown'}).`,
+    );
+  },
+};
+
+// -----------------------------------------------------------------------------
 // Registry + dispatch
 // -----------------------------------------------------------------------------
 
+/**
+ * The tool table.
+ *
+ * A `Map` rather than an object literal because the lookup key comes from the
+ * client: on a plain object, `REGISTRY['toString']` (or `constructor`, or
+ * `__proto__`) resolves through `Object.prototype` to something truthy, so a
+ * request for one of those names would sail past the unknown-tool check and
+ * crash on a missing `argsSchema` instead of returning a tool error.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const REGISTRY: Record<string, ToolDef<any>> = {
-  ping,
-  list_passwords: listPasswordsTool,
-  search_passwords: searchPasswordsTool,
-  get_password: getPasswordTool,
-  list_folders: listFoldersTool,
-  get_folder: getFolderTool,
-  create_password: createPasswordTool,
-  update_password: updatePasswordTool,
-  delete_password: deletePasswordTool,
-  create_folder: createFolderTool,
-  update_folder: updateFolderTool,
-  delete_folder: deleteFolderTool,
-};
+const REGISTRY: ReadonlyMap<string, ToolDef<any>> = new Map<string, ToolDef<any>>([
+  ['ping', ping],
+  ['list_passwords', listPasswordsTool],
+  ['search_passwords', searchPasswordsTool],
+  ['get_password', getPasswordTool],
+  ['list_folders', listFoldersTool],
+  ['get_folder', getFolderTool],
+  ['create_password', createPasswordTool],
+  ['update_password', updatePasswordTool],
+  ['delete_password', deletePasswordTool],
+  ['restore_password', restorePasswordTool],
+  ['create_folder', createFolderTool],
+  ['update_folder', updateFolderTool],
+  ['delete_folder', deleteFolderTool],
+  ['restore_folder', restoreFolderTool],
+]);
 
 /** The tools to advertise. Write tools are omitted entirely in read-only mode. */
 export function listTools(readOnly: boolean): Tool[] {
-  return Object.values(REGISTRY)
-    .filter((d) => !(readOnly && d.write))
-    .map((d) => d.tool);
+  return [...REGISTRY.values()].filter((d) => !(readOnly && d.write)).map((d) => d.tool);
 }
 
 export async function dispatchTool(
@@ -440,7 +677,7 @@ export async function dispatchTool(
   rawArgs: unknown,
   ctx: Context,
 ): Promise<CallToolResult> {
-  const def = REGISTRY[name];
+  const def = REGISTRY.get(name);
   if (!def) {
     return { isError: true, content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
   }
@@ -467,9 +704,14 @@ export async function dispatchTool(
   try {
     return await def.handler(parsed.data, ctx);
   } catch (err) {
+    // Every error class here is written to carry an explanation and no secret
+    // material; `HttpError` in particular never includes a response body.
     const message =
       err instanceof AlreadyTrashedError ||
+      err instanceof NotTrashedError ||
+      err instanceof CustomFieldError ||
       err instanceof CseUnsupportedError ||
+      err instanceof WriteOutcomeUnknownError ||
       err instanceof HttpError
         ? err.message
         : err instanceof Error

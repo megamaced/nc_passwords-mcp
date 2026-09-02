@@ -6,15 +6,23 @@ on:
   pull_request:
     branches: [main]
 
+# This job only reads the repository. Declaring it explicitly keeps the token
+# scope independent of repository or organisation defaults.
+permissions:
+  contents: read
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to full commit SHAs: a major-version tag is mutable,
+      # so a moved or compromised tag would otherwise run arbitrary code in a
+      # workflow belonging to a credential-handling project.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: pnpm
@@ -28,3 +36,22 @@ jobs:
       - run: pnpm test
 
       - run: pnpm build
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Shipped dependencies must stay advisory-clean. If an advisory is proven
+      # unreachable from this server, document it here with an explicit
+      # `--ignore` rather than letting the job stay red.
+      - run: pnpm audit --prod --audit-level low
