@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.1
+
+Dependency upgrades only — no tool changes, no config changes required.
+
+- **zod 3 -> 4** (`4.5.4`). `@modelcontextprotocol/sdk` 1.30.0 declares
+  `zod: "^3.25 || ^4.0"`, so 4.x is supported rather than merely tolerated.
+  No source change was needed: `ZodTypeAny`, `.strict()`, `.refine()`,
+  `z.enum()` over a readonly tuple and `ZodIssue.path` all behave as this
+  code expects, and zod 4 reports more specific validation messages.
+- **Argument-validation behaviour is now covered by tests.** A major version
+  of a validation library can relax what it accepts without failing a
+  typecheck, so the properties the schemas are relied on for are asserted
+  directly: unknown-key rejection via `.strict()` on tools with and without
+  parameters, missing/empty/mistyped arguments, the id-only refinement on
+  both update tools, and the element path reported for an invalid custom
+  field. `.strict()` is the runtime counterpart of `additionalProperties:
+  false` in every `inputSchema`.
+- **GitHub Actions moved to their current majors**, still pinned to full
+  commit SHAs with version comments: `actions/checkout` v7.0.1,
+  `actions/setup-node` v7.0.0, `pnpm/action-setup` v6.0.10.
+- **Dependabot enabled** — alerts, security updates, and version updates for
+  the `github-actions` and `npm` ecosystems (see `.github/dependabot.yml`).
+  Transitive `brace-expansion` bumped to 5.0.9, clearing two high-severity
+  advisories that were development-scope only and never shipped.
+
 ## 0.3.0
 
 Audit fixes ([issues #2–#15](https://github.com/megamaced/nc_passwords-mcp/issues)),

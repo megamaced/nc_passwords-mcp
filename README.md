@@ -77,7 +77,7 @@ Build a tarball and install it globally:
 ```bash
 pnpm install
 pnpm pack:tarball          # produces passwords-mcp-<version>.tgz
-npm install -g ./passwords-mcp-0.3.0.tgz
+npm install -g ./passwords-mcp-0.3.1.tgz
 ```
 
 This installs the `passwords-mcp` command.
