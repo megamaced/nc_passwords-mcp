@@ -1,0 +1,33 @@
+# Dependabot version updates.
+#
+# Security alerts and security updates are enabled separately in the repository
+# settings; this file only governs routine version bumps.
+version: 2
+
+updates:
+  # The CI workflow pins every action to a full commit SHA, which is a
+  # supply-chain control but also freezes them: nothing here would ever notice a
+  # new release. Dependabot rewrites both the SHA and its trailing version
+  # comment, so the pins stay current without becoming mutable tags again.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - '*'
+
+  # Monthly and grouped, deliberately: there are only a handful of dependencies,
+  # `pnpm audit --prod` already gates CI, and anything genuinely urgent arrives
+  # as a security update rather than waiting for this schedule. Grouping also
+  # keeps a lockfile rewrite easy to review in one diff.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      production:
+        dependency-type: production
+      development:
+        dependency-type: development
