@@ -107,3 +107,69 @@ test('restore refuses an item that is not in the trash', async () => {
   assert.equal(result.isError, true);
   assert.match((result.content as { text: string }[])[0]!.text, /not in the trash/);
 });
+
+// -----------------------------------------------------------------------------
+// Argument validation
+//
+// These pin the runtime behaviour of the zod schemas rather than their exact
+// wording. `.strict()` in particular is the runtime counterpart of the
+// `additionalProperties: false` in every inputSchema, so a dependency upgrade
+// silently relaxing it would widen what a client can send at the one place
+// arguments are checked.
+// -----------------------------------------------------------------------------
+
+function errorText(result: Awaited<ReturnType<typeof dispatchTool>>): string {
+  assert.equal(result.isError, true, 'expected an error result');
+  return (result.content as { text: string }[])[0]!.text;
+}
+
+test('unknown argument keys are rejected, on tools with and without parameters', async () => {
+  const { ctx } = contextWith(false, () => Response.json([]));
+
+  assert.match(errorText(await dispatchTool('get_password', { id: 'a', evil: 1 }, ctx)), /Unrecognized key/);
+  // Empty-schema tools must reject extras too, not ignore them.
+  assert.match(errorText(await dispatchTool('ping', { junk: true }, ctx)), /Unrecognized key/);
+});
+
+test('missing, empty and mistyped arguments are rejected', async () => {
+  const { ctx } = contextWith(false, () => Response.json([]));
+
+  assert.match(errorText(await dispatchTool('get_password', {}, ctx)), /^Invalid arguments: id:/);
+  assert.match(errorText(await dispatchTool('get_password', { id: 42 }, ctx)), /^Invalid arguments: id:/);
+  // The custom min(1) message survives.
+  assert.match(errorText(await dispatchTool('get_password', { id: '' }, ctx)), /id is required/);
+});
+
+test('an update with nothing but an id is refused by the refinement', async () => {
+  const { ctx } = contextWith(false, () => Response.json({}));
+
+  for (const tool of ['update_password', 'update_folder']) {
+    assert.match(
+      errorText(await dispatchTool(tool, { id: 'a' }, ctx)),
+      /at least one field to change besides id/,
+      `${tool} should refuse an id-only update`,
+    );
+  }
+});
+
+test('custom field validation reports the offending path and rejects bad types', async () => {
+  const { ctx } = contextWith(false, () => Response.json({}));
+
+  const badType = errorText(
+    await dispatchTool(
+      'create_password',
+      { label: 'l', password: 'p', customFields: [{ label: 'x', type: 'nope', value: 'v' }] },
+      ctx,
+    ),
+  );
+  assert.match(badType, /customFields\.0\.type/, 'the failing element should be identified');
+
+  const missingValue = errorText(
+    await dispatchTool(
+      'create_password',
+      { label: 'l', password: 'p', customFields: [{ label: 'x', type: 'text' }] },
+      ctx,
+    ),
+  );
+  assert.match(missingValue, /customFields\.0\.value/);
+});
