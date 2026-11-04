@@ -19,7 +19,7 @@ const ctx: Context = {
 };
 
 const server = new Server(
-  { name: 'passwords-mcp', version: '0.3.1' },
+  { name: 'passwords-mcp', version: '0.3.2' },
   { capabilities: { tools: {} } },
 );
 

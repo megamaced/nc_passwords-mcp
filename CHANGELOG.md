@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.2
+
+Dependency and CI updates only — no tool changes, no config changes required.
+
+The minimum versions in `package.json` now exclude releases with published
+advisories: `@modelcontextprotocol/sdk` `^1.32.2` (was `^1.30.0`) and `zod`
+`^4.6.7` (was `^4.5.4`). The packed tarball carries only `dist/`, so
+`npm install -g` resolves dependencies within those ranges; the old floors
+allowed the affected versions. The lockfile, used when building from source,
+moves the same way.
+
+- **zod -> 4.6.7** clears
+  [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5):
+  zod through 4.6.5 records an issue for every failing element of an array,
+  without limit, so a client sending a very large invalid `customFields`
+  array could exhaust the server's memory. This is the advisory that reaches
+  a stdio server.
+- **`@modelcontextprotocol/sdk` -> 1.32.2** clears GHSA-f897-62hf-6gxq,
+  GHSA-6qxp-vccf-f47h, GHSA-22jm-h49p-29qw, GHSA-46jr-4wx8-v453,
+  GHSA-rvq5-wwqv-78pq and GHSA-6prh-2h8m-c8cw. They concern the SDK's HTTP
+  transports, bearer auth, experimental tasks and OAuth client, none of which
+  this server uses.
+- **Transitive updates through the SDK:** proxy-addr 2.0.8 (critical,
+  GHSA-jqcg-44mw-7w3h), body-parser 2.4.0, express 5.3.0, hono 4.13.15,
+  @hono/node-server 2.1.5, qs 6.17.1, ip-address 10.7.5, fast-uri 3.1.9. Only
+  fast-uri is loaded at runtime, by ajv when resolving the server's own JSON
+  Schemas; the rest belong to the HTTP transport and auth modules.
+- **TypeScript 5 -> 6** and `@types/node` 24 -> 26, matching the other
+  Nextcloud MCP servers. TypeScript 6 no longer auto-includes `@types/*`, so
+  `tsconfig.json` names `node` explicitly.
+- **CI:** Dependabot minor and patch updates merge themselves once CI passes,
+  after a 7-day cooldown on new upstream releases; `actions/setup-node`
+  7.1.0, `pnpm/action-setup` 6.1.0. ESLint 10.13, typescript-eslint 8.72,
+  tsx 4.23.15.
+
+`pnpm audit --prod` is clean. One development-scope advisory remains —
+minimatch GHSA-g3hv-75wg-m249, via ESLint, fixed only in minimatch 11 — and is
+not part of the installed package.
+
 ## 0.3.1
 
 Dependency upgrades only — no tool changes, no config changes required.
