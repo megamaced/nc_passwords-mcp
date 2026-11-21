@@ -1,6 +1,6 @@
 {
   "name": "passwords-mcp",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "type": "module",
   "description": "Model Context Protocol server for the Nextcloud Passwords app",
@@ -12,7 +12,8 @@
     "passwords-mcp": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.test.*"
   ],
   "scripts": {
     "build": "tsc",
