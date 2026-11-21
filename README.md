@@ -72,15 +72,23 @@ Every tool carries MCP [annotations](https://modelcontextprotocol.io/specificati
 
 ## Install
 
-Build a tarball and install it globally:
+Download `passwords-mcp-<version>.tgz` from the
+[latest GitHub release](https://github.com/megamaced/nc_passwords-mcp/releases/latest)
+and install it with Node.js 24 or later. Substitute the version in the
+downloaded filename.
 
 ```bash
-pnpm install
-pnpm pack:tarball          # produces passwords-mcp-<version>.tgz
-npm install -g ./passwords-mcp-0.3.3.tgz
+npm install -g ./passwords-mcp-VERSION.tgz
 ```
 
-This installs the `passwords-mcp` command.
+This puts the `passwords-mcp` command on your PATH.
+
+To build the same tarball from source:
+
+```bash
+corepack pnpm install --frozen-lockfile
+corepack pnpm pack:tarball
+```
 
 ## Configuration
 

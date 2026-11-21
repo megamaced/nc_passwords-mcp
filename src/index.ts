@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from 'node:module';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -18,8 +19,9 @@ const ctx: Context = {
   readOnly: config.readOnly,
 };
 
+const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 const server = new Server(
-  { name: 'passwords-mcp', version: '0.3.3' },
+  { name: 'passwords-mcp', version },
   { capabilities: { tools: {} } },
 );
 

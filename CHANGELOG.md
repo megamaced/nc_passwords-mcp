@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.4
+
+The GitHub release includes an installable npm tarball. Download it from the
+[releases page](https://github.com/megamaced/nc_passwords-mcp/releases/latest)
+and run `npm install -g ./passwords-mcp-0.3.4.tgz`.
+
+The tarball ships the compiled server, and the MCP handshake reports the version
+from the package manifest.
+
 ## 0.3.3
 
 Update the MCP SDK’s transitive dependencies to `@hono/node-server` 2.1.11
