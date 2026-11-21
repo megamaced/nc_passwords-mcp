@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+Update the MCP SDK’s transitive dependencies to `@hono/node-server` 2.1.11
+and `hono` 4.13.19. This resolves the production audit findings for the
+Hono HTTP dependencies.
+
 ## 0.3.2
 
 Dependency and CI updates only — no tool changes, no config changes required.
